@@ -1,0 +1,471 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Mountain Bike Extreme — клон</title>
+<style>
+  html,body{
+    margin:0;height:100%;overflow:hidden;background:#87CEEB;
+    font-family:Arial,sans-serif;user-select:none;
+    -webkit-tap-highlight-color:transparent;
+    touch-action:none;
+  }
+  canvas{display:block}
+  #hud{
+    position:fixed;top:10px;left:10px;color:#fff;
+    text-shadow:0 2px 4px #000;font-size:16px;font-weight:bold;
+    pointer-events:none;z-index:10;
+  }
+  #trick{
+    position:fixed;top:35%;left:50%;transform:translate(-50%,-50%);
+    color:#FFD700;font-size:42px;font-weight:900;
+    text-shadow:0 3px 8px #000;opacity:0;transition:opacity .3s;
+    pointer-events:none;z-index:10;text-align:center;
+  }
+  #msg{
+    position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);
+    color:#fff;font-size:28px;font-weight:bold;
+    text-shadow:0 3px 8px #000;text-align:center;pointer-events:none;z-index:10;
+  }
+  /* Мобильные кнопки */
+  .btn{
+    position:fixed;bottom:20px;
+    width:70px;height:70px;border-radius:50%;
+    background:rgba(255,255,255,0.25);
+    border:2px solid rgba(255,255,255,0.6);
+    color:#fff;font-size:28px;font-weight:bold;
+    display:flex;align-items:center;justify-content:center;
+    backdrop-filter:blur(4px);
+    -webkit-backdrop-filter:blur(4px);
+    z-index:20;cursor:pointer;
+    transition:background .1s, transform .1s;
+  }
+  .btn.active{
+    background:rgba(255,215,0,0.6);
+    transform:scale(0.92);
+  }
+  #btnLeft{left:20px;}
+  #btnRight{left:110px;}
+  #btnFlipUp{right:110px;}
+  #btnFlipDown{right:20px;}
+  #btnFlipUp,#btnFlipDown{font-size:22px;}
+  @media (min-width: 900px){
+    .btn{display:none;} /* на десктопе кнопки не нужны */
+  }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div id="hud">Очки: 0 &nbsp;|&nbsp; Скорость: 0 &nbsp;|&nbsp; Трюк: <span id="trickName">—</span></div>
+<div id="trick"></div>
+<div id="msg"></div>
+
+<!-- Мобильные кнопки управления -->
+<div class="btn" id="btnLeft">◀</div>
+<div class="btn" id="btnRight">▶</div>
+<div class="btn" id="btnFlipUp">↺</div>
+<div class="btn" id="btnFlipDown">↻</div>
+
+<script>
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+let W, H;
+function resize(){ W = canvas.width = innerWidth; H = canvas.height = innerHeight; }
+addEventListener('resize', resize); resize();
+
+// ---------- Константы ----------
+const GRAVITY = 0.55;
+const FRICTION = 0.992;
+const GROUND_STEP = 60;
+
+// ---------- Мир ----------
+let terrain = [];
+let ramps = [];
+let nextGenX = 0;
+let baseY = 0;
+
+function resetTerrain(){
+  terrain = [];
+  ramps = [];
+  baseY = H * 0.7;
+  for(let x = -400; x < 800; x += GROUND_STEP){
+    terrain.push({x, y: baseY});
+  }
+  nextGenX = 800;
+  generateChunk();
+  generateChunk();
+}
+
+function generateChunk(){
+  const flatLen = 2 + Math.floor(Math.random()*3);
+  for(let i=0;i<flatLen;i++){
+    terrain.push({x: nextGenX, y: baseY});
+    nextGenX += GROUND_STEP;
+  }
+  const type = Math.random();
+  if(type < 0.5){
+    const w = 120 + Math.random()*100;
+    const h = 60 + Math.random()*80;
+    const top = baseY - h;
+    terrain.push({x: nextGenX, y: baseY});
+    const rStartX = nextGenX + 30;
+    terrain.push({x: rStartX + w*0.5, y: top});
+    terrain.push({x: rStartX + w, y: top + 10});
+    ramps.push({x: rStartX + w*0.5, y: top, w: w*0.5, angle: -Math.atan2(h, w*0.5)});
+    nextGenX = rStartX + w;
+    for(let i=0;i<2;i++){ terrain.push({x: nextGenX, y: baseY}); nextGenX += GROUND_STEP; }
+  } else if(type < 0.8){
+    const drop = 80 + Math.random()*120;
+    terrain.push({x: nextGenX, y: baseY});
+    nextGenX += GROUND_STEP;
+    terrain.push({x: nextGenX, y: baseY - drop*0.5});
+    nextGenX += GROUND_STEP;
+    terrain.push({x: nextGenX, y: baseY - drop});
+    nextGenX += GROUND_STEP;
+    baseY -= drop;
+    terrain.push({x: nextGenX, y: baseY});
+    nextGenX += GROUND_STEP;
+  } else {
+    const depth = 100 + Math.random()*120;
+    terrain.push({x: nextGenX, y: baseY});
+    nextGenX += GROUND_STEP;
+    terrain.push({x: nextGenX, y: baseY + depth});
+    nextGenX += GROUND_STEP;
+    terrain.push({x: nextGenX, y: baseY + depth});
+    nextGenX += GROUND_STEP;
+    terrain.push({x: nextGenX, y: baseY - 50});
+    nextGenX += GROUND_STEP;
+    baseY = baseY - 50;
+  }
+  while(terrain.length > 200) terrain.shift();
+}
+
+// ---------- Байк ----------
+const bike = {
+  x: 200, y: 0, vx: 4, vy: 0,
+  angle: 0, angVel: 0,
+  onGround: false,
+  wheelBase: 50, radius: 16,
+  crashTimer: 0, score: 0, lastTrick: '—',
+  airTime: 0, rotationAccum: 0,
+};
+
+function resetBike(){
+  bike.x = 200;
+  bike.y = baseY - 60;
+  bike.vx = 4; bike.vy = 0;
+  bike.angle = 0; bike.angVel = 0;
+  bike.crashTimer = 0; bike.score = 0;
+  bike.airTime = 0; bike.rotationAccum = 0;
+  bike.lastTrick = '—';
+}
+
+// ---------- Управление (клавиши + кнопки) ----------
+const keys = {};
+addEventListener('keydown', e => { keys[e.code] = true; if(e.code==='Space') e.preventDefault(); });
+addEventListener('keyup', e => keys[e.code] = false);
+
+// Мобильные кнопки
+function bindButton(id, keyName){
+  const el = document.getElementById(id);
+  const on = e => { e.preventDefault(); keys[keyName] = true; el.classList.add('active'); };
+  const off = e => { e.preventDefault(); keys[keyName] = false; el.classList.remove('active'); };
+  el.addEventListener('touchstart', on, {passive:false});
+  el.addEventListener('touchend', off, {passive:false});
+  el.addEventListener('touchcancel', off, {passive:false});
+  el.addEventListener('mousedown', on);
+  el.addEventListener('mouseup', off);
+  el.addEventListener('mouseleave', off);
+}
+bindButton('btnLeft', 'ArrowLeft');
+bindButton('btnRight', 'ArrowRight');
+bindButton('btnFlipUp', 'ArrowUp');
+bindButton('btnFlipDown', 'ArrowDown');
+
+// ---------- Рельеф ----------
+function groundAt(x){
+  if(terrain.length < 2) return H;
+  for(let i=0;i<terrain.length-1;i++){
+    const a = terrain[i], b = terrain[i+1];
+    if(x >= a.x && x <= b.x){
+      const t = (x - a.x) / (b.x - a.x);
+      return a.y + (b.y - a.y) * t;
+    }
+  }
+  return H;
+}
+function groundAngleAt(x){
+  const d = 10;
+  return Math.atan2(groundAt(x+d) - groundAt(x-d), 2*d);
+}
+
+// ---------- Физика ----------
+let camX = 0, camY = 0;
+
+function update(){
+  if(bike.crashTimer > 0){
+    bike.crashTimer--;
+    if(bike.crashTimer === 0) resetGame();
+    return;
+  }
+
+  if(keys['ArrowRight'] || keys['KeyD']) bike.vx += 0.25;
+  if(keys['ArrowLeft'] || keys['KeyA']) bike.vx -= 0.25;
+  bike.vx *= FRICTION;
+  bike.vx = Math.max(-6, Math.min(14, bike.vx));
+
+  if(!bike.onGround){
+    if(keys['ArrowUp'] || keys['KeyW']) bike.angVel -= 0.012;
+    if(keys['ArrowDown'] || keys['KeyS']) bike.angVel += 0.012;
+    bike.airTime++;
+    bike.rotationAccum += bike.angVel;
+  }
+
+  bike.vy += GRAVITY;
+  bike.x += bike.vx;
+  bike.y += bike.vy;
+
+  const half = bike.wheelBase / 2;
+  const cosA = Math.cos(bike.angle), sinA = Math.sin(bike.angle);
+  const frontX = bike.x + cosA*half;
+  const rearX  = bike.x - cosA*half;
+
+  const gF = groundAt(frontX), gR = groundAt(rearX);
+  const wheelTouch = (bike.y + Math.abs(sinA)*half + bike.radius) > Math.min(gF, gR) - 4;
+
+  if(wheelTouch && bike.vy > -0.5){
+    const gAngle = groundAngleAt(bike.x);
+    const yGround = groundAt(bike.x) - bike.radius - Math.abs(sinA)*half;
+    if(bike.y > yGround - 2){
+      const diff = Math.abs(bike.angle - gAngle);
+      if(diff > 1.2 && bike.airTime > 20){
+        crash();
+        return;
+      }
+      if(!bike.onGround && bike.airTime > 25){
+        awardTrick();
+      }
+      bike.onGround = true;
+      bike.airTime = 0;
+      bike.rotationAccum = 0;
+      bike.y = yGround;
+      bike.vy = 0;
+      bike.angle = gAngle;
+      bike.angVel = 0;
+      bike.vx += Math.sin(gAngle) * 0.35;
+    }
+  } else {
+    bike.onGround = false;
+  }
+
+  if(!bike.onGround){
+    bike.angle += bike.angVel;
+  }
+
+  if(bike.y > H + 300) crash();
+
+  while(nextGenX < bike.x + W + 400) generateChunk();
+
+  if(bike.onGround) bike.score += Math.max(0, bike.vx) * 0.05;
+
+  camX = bike.x - W * 0.35;
+  camY = bike.y - H * 0.55;
+  camY = Math.min(camY, baseY - H*0.4);
+}
+
+function awardTrick(){
+  const absRot = Math.abs(bike.rotationAccum);
+  const full = Math.PI * 2;
+  let name = '—';
+  if(absRot > full * 1.75) name = 'DOUBLE FLIP!';
+  else if(absRot > full * 0.75) name = 'FLIP!';
+  else if(absRot > full * 0.45) name = '180!';
+  else if(bike.airTime > 45) name = 'BIG AIR!';
+
+  if(name !== '—'){
+    bike.lastTrick = name;
+    bike.score += Math.floor(bike.airTime * 2 + absRot * 50);
+    showTrick(name);
+  }
+}
+
+function crash(){
+  bike.crashTimer = 90;
+  bike.vx = 0; bike.vy = 0; bike.angVel = 0;
+  document.getElementById('msg').textContent = 'УПАЛ! Перезапуск...';
+}
+
+function resetGame(){
+  document.getElementById('msg').textContent = '';
+  resetTerrain();
+  resetBike();
+}
+
+function showTrick(text){
+  const el = document.getElementById('trick');
+  el.textContent = text;
+  el.style.opacity = 1;
+  clearTimeout(showTrick._t);
+  showTrick._t = setTimeout(()=> el.style.opacity = 0, 1200);
+}
+
+// ---------- Рендер ----------
+function draw(){
+  const sky = ctx.createLinearGradient(0,0,0,H);
+  sky.addColorStop(0, '#4A90D9');
+  sky.addColorStop(1, '#A8D8F0');
+  ctx.fillStyle = sky;
+  ctx.fillRect(0,0,W,H);
+
+  drawMountains(0.2, '#6B8E6B');
+  drawMountains(0.4, '#4F7350');
+
+  ctx.save();
+  ctx.translate(-camX, -camY);
+
+  drawTerrain();
+  drawRamps();
+  drawBike();
+
+  ctx.restore();
+
+  document.getElementById('hud').innerHTML =
+    `Очки: ${Math.floor(bike.score)} &nbsp;|&nbsp; Скорость: ${(bike.vx*2).toFixed(0)} км/ч &nbsp;|&nbsp; Трюк: <span id="trickName">${bike.lastTrick}</span>`;
+}
+
+function drawMountains(parallax, color){
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  const offset = (camX * parallax) % 400;
+  ctx.moveTo(-offset - 400, H);
+  for(let x = -offset - 400; x < W + 400; x += 200){
+    const peak = H * 0.35 + Math.sin(x*0.005)*60 + Math.cos(x*0.013)*40;
+    ctx.lineTo(x, peak);
+    ctx.lineTo(x + 100, H * 0.55);
+  }
+  ctx.lineTo(W + 400, H);
+  ctx.closePath();
+  ctx.fill();
+}
+
+function drawTerrain(){
+  if(terrain.length < 2) return;
+  ctx.beginPath();
+  ctx.moveTo(terrain[0].x, H + 500);
+  for(const p of terrain) ctx.lineTo(p.x, p.y);
+  ctx.lineTo(terrain[terrain.length-1].x, H + 500);
+  ctx.closePath();
+  const grad = ctx.createLinearGradient(0, baseY - 200, 0, baseY + 400);
+  grad.addColorStop(0, '#8B6F47');
+  grad.addColorStop(0.3, '#6B8F3A');
+  grad.addColorStop(1, '#3D5C1F');
+  ctx.fillStyle = grad;
+  ctx.fill();
+  ctx.strokeStyle = '#7CB342';
+  ctx.lineWidth = 6;
+  ctx.beginPath();
+  for(let i=0;i<terrain.length;i++){
+    if(i===0) ctx.moveTo(terrain[i].x, terrain[i].y);
+    else ctx.lineTo(terrain[i].x, terrain[i].y);
+  }
+  ctx.stroke();
+}
+
+function drawRamps(){
+  for(const r of ramps){
+    if(r.x + r.w < camX - 100 || r.x - r.w > camX + W + 100) continue;
+    ctx.save();
+    ctx.translate(r.x, r.y);
+    ctx.rotate(r.angle);
+    ctx.fillStyle = '#A0522D';
+    ctx.fillRect(-r.w, 0, r.w*2, 12);
+    ctx.fillStyle = '#CD853F';
+    ctx.fillRect(-r.w, 0, r.w*2, 4);
+    ctx.restore();
+  }
+}
+
+function drawBike(){
+  ctx.save();
+  ctx.translate(bike.x, bike.y);
+  ctx.rotate(bike.angle);
+  const half = bike.wheelBase / 2;
+
+  ctx.fillStyle = 'rgba(0,0,0,0.2)';
+  ctx.beginPath();
+  ctx.ellipse(0, 30, 40, 8, 0, 0, Math.PI*2);
+  ctx.fill();
+
+  drawWheel(-half, 0);
+  drawWheel(half, 0);
+
+  ctx.strokeStyle = '#E63946';
+  ctx.lineWidth = 5;
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(-half, 0); ctx.lineTo(-10, -18);
+  ctx.lineTo(15, -18); ctx.lineTo(half, 0);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(-10, -18); ctx.lineTo(-5, -30);
+  ctx.stroke();
+
+  ctx.strokeStyle = '#222';
+  ctx.lineWidth = 4;
+  ctx.beginPath();
+  ctx.moveTo(-5, -30); ctx.lineTo(20, -32);
+  ctx.stroke();
+
+  ctx.fillStyle = '#222';
+  ctx.fillRect(-18, -26, 16, 5);
+
+  ctx.fillStyle = '#1E3A8A';
+  ctx.beginPath(); ctx.arc(-2, -42, 8, 0, Math.PI*2); ctx.fill();
+  ctx.fillStyle = '#F4A261';
+  ctx.beginPath(); ctx.arc(-2, -42, 6, 0, Math.PI*2); ctx.fill();
+  ctx.fillStyle = '#1E3A8A';
+  ctx.beginPath(); ctx.arc(-2, -44, 7, Math.PI, 0); ctx.fill();
+  ctx.strokeStyle = '#1E3A8A';
+  ctx.lineWidth = 6;
+  ctx.beginPath();
+  ctx.moveTo(-2, -36); ctx.lineTo(5, -20); ctx.lineTo(20, -32);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(5, -20); ctx.lineTo(-10, -10);
+  ctx.stroke();
+
+  ctx.restore();
+}
+
+function drawWheel(x, y){
+  ctx.fillStyle = '#111';
+  ctx.beginPath(); ctx.arc(x, y, bike.radius, 0, Math.PI*2); ctx.fill();
+  ctx.strokeStyle = '#888';
+  ctx.lineWidth = 1.5;
+  for(let i=0;i<6;i++){
+    const a = i * Math.PI / 3;
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+    ctx.lineTo(x + Math.cos(a)*bike.radius*0.85, y + Math.sin(a)*bike.radius*0.85);
+    ctx.stroke();
+  }
+  ctx.fillStyle = '#C0C0C0';
+  ctx.beginPath(); ctx.arc(x, y, 3, 0, Math.PI*2); ctx.fill();
+}
+
+// ---------- Запуск ----------
+resetTerrain();
+resetBike();
+camX = bike.x - W*0.35;
+camY = bike.y - H*0.55;
+
+function loop(){
+  update();
+  draw();
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
